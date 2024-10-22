@@ -15,7 +15,7 @@ const (
 )
 
 var (
-	dir *string = flag.String("path", "./uploads", "dir to save files")
+	dir *string = flag.String("path", "./", "dir to save files")
 	port *int = flag.Int("port", 8000, "port to listen connection")
 	nameLenLimit *int64 = flag.Int64(
 		"nameLenLimit", fourKB, "file name bytes length limit")
