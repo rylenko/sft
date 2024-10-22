@@ -7,7 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"time"
+	"unsafe"
 )
 
 type Status byte
@@ -21,29 +21,28 @@ const (
 	chunkReadLen int64 = 2048
 )
 
-type NamedSized struct {
+type NamedLimited struct {
 	dirPath string
-	nameBytesLenLimit int64
+	nameLenLimit int64
 	contentLenLimit int64
-	measureMinDelay time.Duration
 }
 
-func (receiver *NamedSized) Receive(
-		conn net.Conn, measureChan chan<- Measure) error {
+func (receiver *NamedLimited) Receive(conn net.Conn, measure Measure) error {
 	// Try to receive file name from the connection.
-	name, err := receiver.receiveName(conn)
+	name, err := receiver.receiveName(conn, measure)
 	if err != nil {
 		return fmt.Errorf("receive file name: %v", err)
 	}
 
 	// Try to receive file content length from the connection.
-	contentLen, err := receiver.receiveLen(conn, receiver.contentLenLimit)
+	contentLen, err := receiver.receiveLen(
+		conn, receiver.contentLenLimit, measure)
 	if err != nil {
 		return fmt.Errorf("receive file content length: %v", err)
 	}
 
 	// Try to receive file content.
-	err = receiver.receiveContent(conn, contentLen, name, measureChan)
+	err = receiver.receiveContent(conn, contentLen, name, measure)
 	if err != nil {
 		return fmt.Errorf("receive content with length %d: %v", contentLen, err)
 	}
@@ -51,7 +50,7 @@ func (receiver *NamedSized) Receive(
 	return nil
 }
 
-func (receiver *NamedSized) createFile(
+func (receiver *NamedLimited) createFile(
 		name string, length int64) (*os.File, error) {
 	// Build the full path to the file.
 	path := filepath.Join(receiver.dirPath, name)
@@ -70,11 +69,8 @@ func (receiver *NamedSized) createFile(
 	return file, nil
 }
 
-func (receiver *NamedSized) receiveContent(
-		conn net.Conn,
-		contentLen int64,
-		name string,
-		measureChan chan<- Measure) error {
+func (receiver *NamedLimited) receiveContent(
+		conn net.Conn, contentLen int64, name string, measure Measure) error {
 	// Try to create a file using accepted content length and name.
 	file, err := receiver.createFile(name, contentLen)
 	if err != nil {
@@ -82,79 +78,50 @@ func (receiver *NamedSized) receiveContent(
 			"create a file with name %s and length %d: %v", name, contentLen, err)
 	}
 
-	instantReadedLen := int64(0)
-	totalReadedLen := int64(0)
-
-	startTime := time.Now()
-	lastMeasureTime := startTime
-
-	for totalReadedLen < contentLen {
+	// Read content bytes from connection and add readed lengths to measure.
+	for contentLen > 0 {
 		// Try to copy chunk of bytes from connection to the created file.
 		chunkReadedLen, err := io.CopyN(file, conn, chunkReadLen)
-		if err != nil {
+		if err != nil && err != io.EOF {
 			return fmt.Errorf("copy %d bytes to file %s: %v", chunkReadLen, name, err)
 		}
+		contentLen -= chunkReadedLen
 
-		// Add readed chunk length to instant and total lengths.
-		instantReadedLen += chunkReadedLen
-		totalReadedLen += chunkReadedLen
-
-		currentTime := time.Now()
-		elapsedTime := currentTime.Sub(lastMeasureTime)
-
-		if elapsedTime < receiver.measureMinDelay && totalReadedLen < contentLen {
-			continue
-		}
-
-		measure := NewMeasure(0, 0)
-		if elapsedTime.Seconds() > 0 {
-			measure.InstantSpeed = float64(instantReadedLen) / elapsedTime.Seconds()
-		}
-
-		totalElapsedTime := currentTime.Sub(startTime)
-		if totalElapsedTime.Seconds() > 0 {
-			measure.AverageSpeed = float64(totalReadedLen) / totalElapsedTime.Seconds()
-		}
-
-		// Send measure to channel without block.
-		select {
-		case measureChan <- measure:
-		default:
-		}
-
-		lastMeasureTime = currentTime
-
-		// Zeroize instant length for the next measure accumulation.
-		instantReadedLen = 0
+		// Add readed chunk length to the measure to commit it in the future.
+		measure.AddReadedLen(chunkReadedLen)
 	}
 
-	close(measureChan)
 	return nil
 }
 
-func (receiver *NamedSized) receiveName(conn net.Conn) (string, error) {
+func (receiver *NamedLimited) receiveName(
+		conn net.Conn, measure Measure) (string, error) {
 	// Try to receive name bytes length.
-	nameBytesLen, err := receiver.receiveLen(conn, receiver.nameBytesLenLimit)
+	nameLen, err := receiver.receiveLen(conn, receiver.nameLenLimit, measure)
 	if err != nil {
 		return "", fmt.Errorf("failed to receive bytes length: %v", err)
 	}
 
 	// Try to receive a name bytes.
-	nameBytes := make([]byte, nameBytesLen)
+	nameBytes := make([]byte, nameLen)
 	if _, err := io.ReadFull(conn, nameBytes); err != nil {
-		return "", fmt.Errorf("failed to receive %d bytes: %v", nameBytesLen, err)
+		return "", fmt.Errorf("failed to receive %d bytes: %v", nameLen, err)
 	}
+	// Add readed name length to measure.
+	measure.AddReadedLen(nameLen)
 
 	return string(nameBytes), nil
 }
 
-func (receiver *NamedSized) receiveLen(
-		conn net.Conn, limit int64) (int64, error) {
+func (receiver *NamedLimited) receiveLen(
+		conn net.Conn, limit int64, measure Measure) (int64, error) {
 	// Try to receive a length.
 	var length int64
 	if err := binary.Read(conn, binary.LittleEndian, &length); err != nil {
 		return 0, fmt.Errorf("failed to read: %v", err)
 	}
+	// Add readed length variable size to measure.
+	measure.AddReadedLen(int64(unsafe.Sizeof(length)))
 
 	// Validate readed length using accepted limit.
 	if length > limit {
@@ -165,7 +132,7 @@ func (receiver *NamedSized) receiveLen(
 		}
 
 		return 0, fmt.Errorf(
-			"too long (%d), limit is (%d)", length, receiver.nameBytesLenLimit)
+			"too long (%d), limit is (%d)", length, receiver.nameLenLimit)
 	}
 
 	// Try to write ok status to the connection.
@@ -176,15 +143,11 @@ func (receiver *NamedSized) receiveLen(
 	return length, nil
 }
 
-func NewNamedSized(
-		dirPath string,
-		nameBytesLenLimit,
-		contentLenLimit int64,
-		measureMinDelay time.Duration) *NamedSized {
-	return &NamedSized{
+func NewNamedLimited(
+		dirPath string, nameLenLimit, contentLenLimit int64) *NamedLimited {
+	return &NamedLimited{
 		dirPath: dirPath,
 		contentLenLimit: contentLenLimit,
-		nameBytesLenLimit: nameBytesLenLimit,
-		measureMinDelay: measureMinDelay,
+		nameLenLimit: nameLenLimit,
 	}
 }

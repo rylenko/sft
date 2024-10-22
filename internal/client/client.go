@@ -21,6 +21,7 @@ func Launch(s sender.Sender, address, filePath string) error {
 	if err != nil {
 		return fmt.Errorf("connect via tcp to server %s: %v", address, err)
 	}
+	defer conn.Close()
 
 	// Try to send file using opened file and established connection.
 	if err := s.Send(conn, file); err != nil {

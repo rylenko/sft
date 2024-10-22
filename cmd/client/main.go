@@ -22,17 +22,15 @@ var (
 func main() {
 	flag.Parse()
 
-	// Validate required parameters.
+	// Validate required CLI parameters.
 	if *address == "" || *path == "" {
 		fmt.Fprintln(os.Stderr, "Missing required paramters\n")
-
 		flag.Usage()
 		os.Exit(missingRequiredParamsExitCode)
 	}
 
-	// Launch client with accepted arguments.
-	err := client.Launch(sender.NewNamedSized(), *address, *path)
-	if err != nil {
-		log.Fatal("failed to launch client:", err)
+	// Launch client with parsed CLI arguments.
+	if err := client.Launch(sender.NewNamed(), *address, *path); err != nil {
+		log.Fatal("failed to launch client: ", err)
 	}
 }
