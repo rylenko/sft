@@ -1,0 +1,10 @@
+go 1.22.5
+
+use (
+	./cmd/client
+	./cmd/server
+	./internal/client
+	./internal/receiver
+	./internal/sender
+	./internal/server
+)
